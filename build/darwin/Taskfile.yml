@@ -1,0 +1,49 @@
+version: '3'
+
+tasks:
+  build:
+    platforms: [darwin]
+    deps:
+      - task: :common:build:frontend
+        vars:
+          DEV: '{{.DEV}}'
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build {{if ne .DEV "true"}}-tags production -trimpath{{end}} -ldflags="-extldflags=-mmacosx-version-min=13.0{{if ne .DEV "true"}} -w -s{{end}}" -o {{.BIN_DIR}}/{{.APP_NAME}} .
+    env:
+      CGO_ENABLED: 1
+      CGO_CFLAGS: '-mmacosx-version-min=13.0'
+      CGO_LDFLAGS: '-mmacosx-version-min=13.0'
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+
+  package:
+    deps:
+      - task: build
+    cmds:
+      - task: bundle
+        vars:
+          BUNDLE: '{{.BIN_DIR}}/Tusk.app'
+          PLIST: build/darwin/Info.plist
+
+  bundle:
+    internal: true
+    deps:
+      - task: :common:generate:icons
+    requires:
+      vars: [BUNDLE, PLIST]
+    cmds:
+      - mkdir -p '{{.BUNDLE}}/Contents/MacOS' '{{.BUNDLE}}/Contents/Resources'
+      - cp '{{.BIN_DIR}}/{{.APP_NAME}}' '{{.BUNDLE}}/Contents/MacOS/{{.APP_NAME}}'
+      - cp '{{.PLIST}}' '{{.BUNDLE}}/Contents/Info.plist'
+      - cp build/darwin/icons.icns '{{.BUNDLE}}/Contents/Resources/'
+      - xattr -cr '{{.BUNDLE}}'
+      - codesign --force --deep --sign - '{{.BUNDLE}}'
+      - codesign --verify --deep --strict '{{.BUNDLE}}'
+
+  run:
+    cmds:
+      - task: bundle
+        vars:
+          BUNDLE: '{{.BIN_DIR}}/Tusk.dev.app'
+          PLIST: build/darwin/Info.dev.plist
+      - '"{{.BIN_DIR}}/Tusk.dev.app/Contents/MacOS/{{.APP_NAME}}"'

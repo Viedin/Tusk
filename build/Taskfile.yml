@@ -1,0 +1,52 @@
+version: '3'
+
+tasks:
+  generate:icons:
+    run: once
+    sources:
+      - build/appicon.png
+    generates:
+      - build/darwin/icons.icns
+    cmds:
+      - wails3 generate icons -input build/appicon.png -macfilename build/darwin/icons.icns -windowsfilename ''
+
+  go:mod:tidy:
+    run: once
+    cmds:
+      - mkdir -p frontend/dist
+      - touch frontend/dist/.gitkeep
+      - go mod tidy
+
+  install:frontend:deps:
+    run: once
+    dir: frontend
+    sources:
+      - package.json
+      - package-lock.json
+    generates:
+      - node_modules
+    cmds:
+      - npm ci
+
+  generate:bindings:
+    run: once
+    deps:
+      - task: go:mod:tidy
+    cmds:
+      - wails3 generate bindings -ts -i -clean=true
+
+  build:frontend:
+    run: once
+    deps:
+      - task: install:frontend:deps
+      - task: generate:bindings
+    dir: frontend
+    cmds:
+      - npm run {{if eq .DEV "true"}}build:dev{{else}}build{{end}}
+
+  dev:frontend:
+    deps:
+      - task: install:frontend:deps
+    dir: frontend
+    cmds:
+      - npm run dev -- --port {{.VITE_PORT}} --strictPort
