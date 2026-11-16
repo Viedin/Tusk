@@ -6,7 +6,13 @@ A lightweight PostgreSQL and SQLite browser and editor for macOS.
 - Edit cells, remove rows, and export results as CSV.
 - Save connections with credentials protected by macOS Keychain.
 
-Early development. Build from source; signed, notarized downloads aren't available yet.
+Early development.
+
+## Download
+
+[Download Tusk for macOS](https://github.com/Viedin/Tusk/releases/latest/download/Tusk-macOS-universal.zip) (macOS 13+, Apple silicon and Intel).
+
+Unzip and move `Tusk.app` to Applications. This build isn't notarized; if macOS blocks it, follow [Apple's first-launch instructions](https://support.apple.com/en-us/102445).
 
 ## Build
 
