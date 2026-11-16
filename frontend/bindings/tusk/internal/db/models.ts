@@ -14,6 +14,8 @@ export interface ColumnInfo {
 }
 
 export interface ConnectionInfo {
+    "provider": string;
+    "filePath"?: string;
     "database": string;
     "user": string;
     "host": string;
@@ -21,6 +23,8 @@ export interface ConnectionInfo {
 }
 
 export interface ConnectionOptions {
+    "provider"?: string;
+    "filePath"?: string;
     "host": string;
     "port": number;
     "database": string;
@@ -37,6 +41,26 @@ export interface QueryResult {
     "durationMs": number;
     "truncated": boolean;
     "commandTag": string;
+    "deletionTarget"?: RowTarget | null;
+    "removalUnavailableReason": string;
+}
+
+export interface RowChange {
+    "original": (string | null)[] | null;
+    "values": { [_ in string]?: string | null } | null;
+    "delete": boolean;
+}
+
+export interface RowTarget {
+    "schema": string;
+    "table": string;
+    "columns": string[] | null;
+}
+
+export interface TableEditInfo {
+    "keyColumns": string[] | null;
+    "readOnlyColumns": string[] | null;
+    "reason": string;
 }
 
 export interface TableInfo {

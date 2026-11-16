@@ -138,13 +138,15 @@ func TestPostgreSQLWorkflow(t *testing.T) {
 	})
 
 	t.Run("cancel then reuse", func(t *testing.T) {
+		pid := backendPID(t, s)
 		done := make(chan error, 1)
 		go func() { _, err := s.RunQuery("SELECT pg_sleep(20)"); done <- err }()
 		deadline := time.Now().Add(2 * time.Second)
 		for {
-			s.mu.Lock()
-			active := s.cancel != nil
-			s.mu.Unlock()
+			var active bool
+			if err := admin.QueryRow(context.Background(), "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND state='active')", pid).Scan(&active); err != nil {
+				t.Fatal(err)
+			}
 			if active {
 				break
 			}

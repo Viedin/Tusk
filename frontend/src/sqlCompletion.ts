@@ -1,4 +1,4 @@
-import { PostgreSQL, schemaCompletionSource, type SQLConfig, type SQLNamespace } from '@codemirror/lang-sql';
+import { PostgreSQL, SQLite, schemaCompletionSource, type SQLConfig, type SQLNamespace } from '@codemirror/lang-sql';
 import { CompletionContext, type Completion, type CompletionSource } from '@codemirror/autocomplete';
 import { syntaxTree } from '@codemirror/language';
 import type { SyntaxNode } from '@lezer/common';
@@ -15,7 +15,11 @@ function identifier(name: string, type: string, detail: string): Completion {
   return { label: name.replaceAll('"', '""'), displayLabel: name, apply: quoteIdentifier(name), type, detail };
 }
 
-export function sqlCompletionConfig(tables: readonly Table[], columns: readonly Column[]): SQLConfig {
+export function sqlDialect(provider = 'postgres') {
+  return provider === 'sqlite' ? SQLite : PostgreSQL;
+}
+
+export function sqlCompletionConfig(tables: readonly Table[], columns: readonly Column[], provider = 'postgres'): SQLConfig {
   // shortcut: CodeMirror cannot resolve context after embedded-quote identifiers; revisit when its SQL parser supports them.
   const schema: Namespace = Object.create(null);
   const children = new Map<string, Namespace>();
@@ -42,11 +46,12 @@ export function sqlCompletionConfig(tables: readonly Table[], columns: readonly 
   for (const column of columns) {
     fields.get(column.schema)?.get(column.table)?.push(identifier(column.name, 'property', column.dataType ?? 'column'));
   }
-  return { dialect: PostgreSQL, schema, defaultSchema: children.has('public') ? 'public' : undefined, upperCaseKeywords: true };
+  const defaultSchema = provider === 'sqlite' ? 'main' : 'public';
+  return { dialect: sqlDialect(provider), schema, defaultSchema: children.has(defaultSchema) ? defaultSchema : undefined, upperCaseKeywords: true };
 }
 
 /** Infer only simple relations in this parser-delimited SELECT statement. */
-function statementRelations(context: CompletionContext, tables: readonly Table[]): Relation[] {
+function statementRelations(context: CompletionContext, tables: readonly Table[], provider: string): Relation[] {
   let node: SyntaxNode | null = syntaxTree(context.state).resolveInner(context.pos, -1);
   for (let ancestor: SyntaxNode | null = node; ancestor; ancestor = ancestor.parent) {
     if (ancestor.name === 'String' || ancestor.name.includes('Comment')) return [];
@@ -76,8 +81,10 @@ function statementRelations(context: CompletionContext, tables: readonly Table[]
     if (!expectsTable || word === 'only') continue;
     const path = identifierPath(context, token);
     if (!path || path.length > 2 || tokens[index + 1]?.name === 'Parens') return [];
-    const candidates = tables.filter(table => table.name === path.at(-1) && (path.length === 1 || table.schema === path[0]));
-    const table = path.length === 1 ? candidates.find(table => table.schema === 'public') ?? (candidates.length === 1 ? candidates[0] : undefined) : candidates[0];
+    const matches = (left: string, right: string) => provider === 'sqlite' ? left.toLowerCase() === right.toLowerCase() : left === right;
+    const candidates = tables.filter(table => matches(table.name, path.at(-1)!) && (path.length === 1 || matches(table.schema, path[0])));
+    const defaultSchema = provider === 'sqlite' ? 'main' : 'public';
+    const table = path.length === 1 ? candidates.find(table => table.schema === defaultSchema) ?? (candidates.length === 1 ? candidates[0] : undefined) : candidates[0];
     if (!table) return [];
     let alias: string | undefined;
     if (keyword(context, tokens[index + 1]) === 'as') index++;
@@ -108,20 +115,23 @@ function identifierPath(context: CompletionContext, node?: SyntaxNode): string[]
     return parts.every(part => part?.length === 1) ? parts.flatMap(part => part!) : null;
   }
   const text = context.state.sliceDoc(node.from, node.to);
-  return node.name === 'Identifier' ? [text.toLowerCase()]
-    : node.name === 'QuotedIdentifier' && text.endsWith('"') ? [text.slice(1, -1).replaceAll('""', '"')] : null;
+  if (node.name === 'Identifier') return [text.toLowerCase()];
+  if (node.name !== 'QuotedIdentifier') return null;
+  const close = text[0] === '[' ? ']' : text[0];
+  return ['"', '`', '['].includes(text[0]) && text.endsWith(close)
+    ? [text.slice(1, -1).replaceAll(close + close, close)] : null;
 }
 
 /** Add statement-local columns while retaining CodeMirror's qualified-name resolution. */
-export function queryCompletionSource(tables: readonly Table[], columns: readonly Column[]): CompletionSource {
-  const config = sqlCompletionConfig(tables, columns);
+export function queryCompletionSource(tables: readonly Table[], columns: readonly Column[], provider = 'postgres'): CompletionSource {
+  const config = sqlCompletionConfig(tables, columns, provider);
   const fallback = schemaCompletionSource(config);
   let activeTable: Table | undefined;
   let tableSource: CompletionSource;
   return async context => {
     const at = syntaxTree(context.state).resolveInner(context.pos, -1);
     if (at.name === 'String' || at.name.includes('Comment')) return null;
-    const relations = statementRelations(context, tables);
+    const relations = statementRelations(context, tables, provider);
     if (relations.length === 1) {
       const table = relations[0].table;
       if (table !== activeTable) {

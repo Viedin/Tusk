@@ -10,113 +10,41 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
+	"tusk/internal/db"
 )
 
-const (
-	queryRowLimit   = 1000
-	resultByteLimit = 5 << 20
-	queryTimeout    = 5 * time.Minute
-)
+type ConnectionInfo = db.ConnectionInfo
+type ConnectionOptions = db.ConnectionOptions
+type TableInfo = db.TableInfo
+type ColumnInfo = db.ColumnInfo
+type CatalogColumn = db.CatalogColumn
+type QueryResult = db.QueryResult
 
-type ConnectionInfo struct {
-	Database string `json:"database"`
-	User     string `json:"user"`
-	Host     string `json:"host"`
-	Port     uint16 `json:"port"`
-}
+type Provider struct{}
 
-type ConnectionOptions struct {
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Database string `json:"database"`
-	User     string `json:"user"`
-	Password string `json:"password"`
-	SSLMode  string `json:"sslMode"`
-}
+func NewProvider() *Provider { return &Provider{} }
 
-type TableInfo struct {
-	Schema string `json:"schema"`
-	Name   string `json:"name"`
-	Type   string `json:"type"`
-}
+type session struct{ conn *pgx.Conn }
 
-type ColumnInfo struct {
-	Name     string `json:"name"`
-	DataType string `json:"dataType"`
-}
+var _ db.Provider = (*Provider)(nil)
+var _ db.Store = (*session)(nil)
 
-type CatalogColumn struct {
-	Schema   string `json:"schema"`
-	Table    string `json:"table"`
-	Name     string `json:"name"`
-	DataType string `json:"dataType"`
-}
-
-type QueryResult struct {
-	Columns      []ColumnInfo `json:"columns"`
-	Rows         [][]*string  `json:"rows"`
-	RowCount     int          `json:"rowCount"`
-	RowsAffected string       `json:"rowsAffected"`
-	DurationMs   int64        `json:"durationMs"`
-	Truncated    bool         `json:"truncated"`
-	CommandTag   string       `json:"commandTag"`
-}
-
-// Service owns a single session; every database operation shares its cancellation gate.
-type Service struct {
-	mu             sync.Mutex
-	conn           *pgx.Conn
-	cancel         context.CancelFunc
-	done           chan struct{}
-	disconnecting  bool
-	disconnectDone chan struct{}
-	closed         bool
-}
-
-func NewService() *Service { return &Service{} }
-
-func (s *Service) begin(requireConnection bool, timeout time.Duration) (context.Context, *pgx.Conn, func(), error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil, nil, nil, errors.New("Tusk is shutting down")
+func (p *Provider) Open(ctx context.Context, request db.ConnectionConfig) (db.Store, ConnectionInfo, error) {
+	connectionURL, password := request.URL, request.Password
+	if connectionURL == "" {
+		var err error
+		connectionURL, err = ConnectionURLForOptions(request.Options)
+		if err != nil {
+			return nil, ConnectionInfo{}, err
+		}
+		password = &request.Options.Password
 	}
-	if s.disconnecting || s.cancel != nil {
-		return nil, nil, nil, errors.New("Another operation is running. Cancel it or wait for it to finish")
-	}
-	if requireConnection && (s.conn == nil || s.conn.IsClosed()) {
-		return nil, nil, nil, errors.New("Not connected. Connect to a PostgreSQL database first")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	done := make(chan struct{})
-	s.cancel, s.done = cancel, done
-	return ctx, s.conn, func() {
-		cancel()
-		s.mu.Lock()
-		s.cancel, s.done = nil, nil
-		close(done)
-		s.mu.Unlock()
-	}, nil
-}
-
-func (s *Service) Connect(connectionURL string) (ConnectionInfo, error) {
-	return s.connect(connectionURL, nil)
-}
-
-// ConnectSavedURL connects with the password captured when the URL was saved.
-// Kept off Service's method set to avoid adding a Wails binding.
-func ConnectSavedURL(s *Service, connectionURL, password string) (ConnectionInfo, error) {
-	return s.connect(connectionURL, &password)
-}
-
-func (s *Service) connect(connectionURL string, password *string) (ConnectionInfo, error) {
 	var info ConnectionInfo
 	connectionURL = strings.TrimSpace(connectionURL)
 	if strings.HasPrefix(connectionURL, "jdbc:postgresql://") || strings.HasPrefix(connectionURL, "jdbc:postgres://") {
@@ -124,11 +52,11 @@ func (s *Service) connect(connectionURL string, password *string) (ConnectionInf
 	}
 	parsed, err := url.Parse(connectionURL)
 	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
-		return info, errors.New("Enter a PostgreSQL URL beginning with postgres:// or postgresql://")
+		return nil, info, errors.New("Enter a PostgreSQL URL beginning with postgres:// or postgresql://")
 	}
 	config, err := pgx.ParseConfig(connectionURL)
 	if err != nil {
-		return info, errors.New("Invalid PostgreSQL connection URL. Check its host, port, credentials, and TLS options")
+		return nil, info, errors.New("Invalid PostgreSQL connection URL. Check its host, port, credentials, and TLS options")
 	}
 	if password != nil {
 		// A blank password in the form must not silently use PGPASSWORD or a passfile.
@@ -139,33 +67,17 @@ func (s *Service) connect(connectionURL string, password *string) (ConnectionInf
 	config.BuildContextWatcherHandler = func(conn *pgconn.PgConn) ctxwatch.Handler {
 		return &pgconn.CancelRequestContextWatcherHandler{Conn: conn, DeadlineDelay: 3 * time.Second}
 	}
-	ctx, old, finish, err := s.begin(false, 15*time.Second)
-	if err != nil {
-		return info, err
-	}
-	defer finish()
 	conn, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
-		return info, connectionError(ctx, err)
+		return nil, info, connectionError(ctx, err)
 	}
 	if err := conn.QueryRow(ctx, "SELECT current_database(), current_user").Scan(&info.Database, &info.User); err != nil {
 		closeConnection(conn)
-		return ConnectionInfo{}, connectionError(ctx, err)
+		return nil, ConnectionInfo{}, connectionError(ctx, err)
 	}
 	info.Host, info.Port = config.Host, config.Port
-	s.mu.Lock()
-	s.conn = conn
-	s.mu.Unlock()
-	closeConnection(old)
-	return info, nil
-}
-
-func (s *Service) ConnectWithOptions(options ConnectionOptions) (ConnectionInfo, error) {
-	connectionURL, err := ConnectionURLForOptions(options)
-	if err != nil {
-		return ConnectionInfo{}, err
-	}
-	return s.connect(connectionURL, &options.Password)
+	info.Provider = "postgres"
+	return &session{conn: conn}, info, nil
 }
 
 // ConnectionURLForOptions validates form fields and preserves exact credential values.
@@ -219,12 +131,8 @@ func ConnectionURLForOptions(options ConnectionOptions) (string, error) {
 	return connectionURL.String(), nil
 }
 
-func (s *Service) ListTables() ([]TableInfo, error) {
-	ctx, conn, finish, err := s.begin(true, queryTimeout)
-	if err != nil {
-		return nil, err
-	}
-	defer finish()
+func (s *session) ListTables(ctx context.Context) ([]TableInfo, error) {
+	conn := s.conn
 	rows, err := conn.Query(ctx, `
 		SELECT n.nspname, c.relname,
 		       CASE c.relkind WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view'
@@ -255,12 +163,8 @@ func (s *Service) ListTables() ([]TableInfo, error) {
 	return tables, nil
 }
 
-func (s *Service) ListSchemas() ([]string, error) {
-	ctx, conn, finish, err := s.begin(true, queryTimeout)
-	if err != nil {
-		return nil, err
-	}
-	defer finish()
+func (s *session) ListSchemas(ctx context.Context) ([]string, error) {
+	conn := s.conn
 	rows, err := conn.Query(ctx, `
 		SELECT nspname FROM pg_catalog.pg_namespace
 		WHERE nspname <> 'information_schema' AND nspname !~ '^pg_'
@@ -284,12 +188,8 @@ func (s *Service) ListSchemas() ([]string, error) {
 	return schemas, nil
 }
 
-func (s *Service) ListColumns() ([]CatalogColumn, error) {
-	ctx, conn, finish, err := s.begin(true, queryTimeout)
-	if err != nil {
-		return nil, err
-	}
-	defer finish()
+func (s *session) ListColumns(ctx context.Context) ([]CatalogColumn, error) {
+	conn := s.conn
 	rows, err := conn.Query(ctx, `
 		SELECT n.nspname, c.relname, a.attname,
 		       pg_catalog.format_type(a.atttypid, a.atttypmod)
@@ -321,47 +221,13 @@ func (s *Service) ListColumns() ([]CatalogColumn, error) {
 	return columns, nil
 }
 
-func (s *Service) BrowseTable(schema, table string) (QueryResult, error) {
-	if schema == "" || table == "" || strings.ContainsRune(schema+table, '\x00') {
-		return QueryResult{}, errors.New("Choose a valid schema and table")
-	}
-	return s.query("SELECT * FROM "+pgx.Identifier{schema, table}.Sanitize()+" LIMIT 100", 100)
-}
-
-func (s *Service) BrowseTableSorted(schema, table, sortColumn string, descending bool) (QueryResult, error) {
-	if schema == "" || table == "" || sortColumn == "" || strings.ContainsRune(schema+table+sortColumn, '\x00') {
-		return QueryResult{}, errors.New("Choose a valid schema, table, and sort column")
-	}
-	direction := "ASC"
-	if descending {
-		direction = "DESC"
-	}
-	// Keep NULL values last in both directions; PostgreSQL sorts before applying the row limit.
-	sql := "SELECT * FROM " + pgx.Identifier{schema, table}.Sanitize() +
-		" ORDER BY " + pgx.Identifier{sortColumn}.Sanitize() + " " + direction + " NULLS LAST LIMIT 100"
-	return s.query(sql, 100)
-}
-
-func (s *Service) RunQuery(sql string) (QueryResult, error) {
-	if strings.TrimSpace(sql) == "" {
-		return QueryResult{}, errors.New("Enter one SQL statement to run")
-	}
-	if len(sql) > 1<<20 {
-		return QueryResult{}, errors.New("SQL statements must be smaller than 1 MiB")
-	}
-	return s.query(sql, queryRowLimit)
-}
-
-func (s *Service) query(sql string, rowLimit int) (QueryResult, error) {
+func (s *session) Query(ctx context.Context, sql string, rowLimit int) (QueryResult, error) {
 	result := QueryResult{Columns: []ColumnInfo{}, Rows: [][]*string{}, RowsAffected: "0"}
-	ctx, conn, finish, err := s.begin(true, queryTimeout)
-	if err != nil {
-		return result, err
-	}
-	defer finish()
+	conn := s.conn
 	started := time.Now()
 	// Extended protocol rejects multiple statements and text format preserves numeric precision.
 	reader := conn.PgConn().ExecParams(ctx, sql, nil, nil, nil, nil)
+	fields := append([]pgconn.FieldDescription(nil), reader.FieldDescriptions()...)
 	for _, field := range reader.FieldDescriptions() {
 		dataType := "oid:" + strconv.FormatUint(uint64(field.DataTypeOID), 10)
 		if known, ok := conn.TypeMap().TypeForOID(field.DataTypeOID); ok {
@@ -376,7 +242,7 @@ func (s *Service) query(sql string, rowLimit int) (QueryResult, error) {
 			result.Truncated = true
 			continue
 		}
-		if !appendResultRow(&result, reader.Values(), &byteCount, resultByteLimit) {
+		if !db.AppendResultRow(&result, reader.Values(), &byteCount, db.ResultByteLimit) {
 			result.Truncated = true
 		}
 	}
@@ -389,71 +255,14 @@ func (s *Service) query(sql string, rowLimit int) (QueryResult, error) {
 	result.CommandTag = tag.String()
 	result.RowsAffected = strconv.FormatInt(tag.RowsAffected(), 10)
 	result.RowCount = len(result.Rows)
+	s.identifyDeletionTarget(ctx, sql, fields, &result)
 	return result, nil
 }
 
-func appendResultRow(result *QueryResult, values [][]byte, byteCount *int, byteLimit int) bool {
-	row := make([]*string, len(values))
-	for i, value := range values {
-		if value != nil {
-			text := string(value)
-			row[i] = &text
-		}
-	}
-	encoded, _ := json.Marshal(row)
-	if *byteCount+len(encoded) > byteLimit {
-		return false
-	}
-	*byteCount += len(encoded)
-	result.Rows = append(result.Rows, row)
-	return true
-}
-
-func (s *Service) CancelQuery() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cancel != nil {
-		s.cancel()
-	}
-	return nil
-}
-
-func (s *Service) Disconnect() error { return s.disconnect(false) }
-
-func (s *Service) Shutdown() { _ = s.disconnect(true) }
-
-func (s *Service) disconnect(shutdown bool) error {
-	s.mu.Lock()
-	if shutdown {
-		s.closed = true
-	}
-	if s.disconnecting {
-		done := s.disconnectDone
-		s.mu.Unlock()
-		<-done
-		return nil
-	}
-	s.disconnecting = true
-	s.disconnectDone = make(chan struct{})
-	done := s.done
-	if s.cancel != nil {
-		s.cancel()
-	}
-	s.mu.Unlock()
-	if done != nil {
-		<-done
-	}
-	s.mu.Lock()
-	conn := s.conn
-	s.conn = nil
-	s.mu.Unlock()
-	closeConnection(conn)
-	s.mu.Lock()
-	s.disconnecting = false
-	close(s.disconnectDone)
-	s.disconnectDone = nil
-	s.mu.Unlock()
-	return nil
+func (s *session) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return s.conn.Close(ctx)
 }
 
 func closeConnection(conn *pgx.Conn) {

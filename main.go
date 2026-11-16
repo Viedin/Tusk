@@ -5,7 +5,11 @@ import (
 	"log"
 	"log/slog"
 
+	"tusk/internal/csvexport"
+	"tusk/internal/database"
+	"tusk/internal/db"
 	"tusk/internal/postgres"
+	"tusk/internal/sqlite"
 	"tusk/internal/store"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -15,14 +19,15 @@ import (
 var assets embed.FS
 
 func main() {
-	database := postgres.NewService()
+	database := database.NewService(map[string]db.Provider{"postgres": postgres.NewProvider(), "sqlite": sqlite.NewProvider()})
 	connections := store.NewConnectionsService(database)
 	app := application.New(application.Options{
 		Name:        "Tusk",
-		Description: "A lightweight PostgreSQL desktop client",
+		Description: "A lightweight PostgreSQL and SQLite desktop client",
 		Services: []application.Service{
 			application.NewService(database),
 			application.NewService(connections),
+			application.NewService(csvexport.NewService()),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
@@ -37,7 +42,7 @@ func main() {
 		},
 	})
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title:            "Tusk — PostgreSQL",
+		Title:            "Tusk",
 		Width:            1240,
 		Height:           800,
 		MinWidth:         900,

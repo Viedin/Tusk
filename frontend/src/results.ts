@@ -40,11 +40,11 @@ function compareNumbers(left: NumericKey, right: NumericKey): number {
   return 0;
 }
 
-const numericTypes = new Set(['int2', 'int4', 'int8', 'smallint', 'integer', 'bigint', 'numeric', 'decimal', 'float4', 'float8', 'real', 'double precision', 'oid']);
+const numericTypes = new Set(['int', 'int2', 'int4', 'int8', 'tinyint', 'smallint', 'mediumint', 'integer', 'bigint', 'unsigned big int', 'int64', 'numeric', 'decimal', 'float', 'float4', 'float8', 'real', 'double', 'double precision', 'oid']);
 
 // Keep source indices so a selected cell follows its row after a displayed-result sort.
 export function sortedRowIndices(rows: CellValue[][], column: number, dataType: string, descending: boolean): number[] {
-  const isNumeric = numericTypes.has(dataType.toLowerCase());
+  const isNumeric = numericTypes.has(dataType.toLowerCase().replace(/\s*\([^)]*\)$/, '').trim());
   const entries = rows.map((row, index) => ({ index, value: row[column] ?? null, numeric: isNumeric && row[column] !== null ? numericKey(row[column] ?? '') : null }));
   entries.sort((left, right) => {
     if (left.value === null || right.value === null) {
@@ -59,7 +59,7 @@ export function sortedRowIndices(rows: CellValue[][], column: number, dataType: 
 }
 
 export function hasAffectedRows(commandTag: string): boolean {
-  return /^(INSERT|UPDATE|DELETE|MERGE)(?:\s|$)/i.test(commandTag.trim());
+  return /^(INSERT|REPLACE|UPDATE|DELETE|MERGE)(?:\s|$)/i.test(commandTag.trim());
 }
 
 export function resultStatus(result: { columns: unknown[]; rowCount: number; rowsAffected: string; commandTag: string }): string {

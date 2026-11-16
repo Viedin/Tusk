@@ -20,7 +20,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	_ "github.com/mattn/go-sqlite3"
 
+	"tusk/internal/database"
+	"tusk/internal/db"
 	"tusk/internal/postgres"
+	"tusk/internal/sqlite"
 )
 
 type SavedConnection struct {
@@ -33,50 +36,52 @@ type SavedConnection struct {
 	Mode     string `json:"mode"`
 	SSLMode  string `json:"sslMode"`
 	// Empty colors preserve the authenticated metadata of version 1 records.
-	Color string `json:"color,omitempty"`
+	Color    string `json:"color,omitempty"`
+	Provider string `json:"provider"`
+	FilePath string `json:"filePath,omitempty"`
 }
 
 type SaveConnectionInput struct {
-	Color   string                     `json:"color"`
-	Name    string                     `json:"name"`
-	Mode    string                     `json:"mode"`
-	URL     string                     `json:"url"`
-	Options postgres.ConnectionOptions `json:"options"`
+	Color   string               `json:"color"`
+	Name    string               `json:"name"`
+	Mode    string               `json:"mode"`
+	URL     string               `json:"url"`
+	Options db.ConnectionOptions `json:"options"`
 }
 
 type UpdateConnectionInput struct {
-	Name            string                     `json:"name"`
-	Color           string                     `json:"color"`
-	Options         postgres.ConnectionOptions `json:"options"`
-	URL             string                     `json:"url"`
-	ReplacePassword bool                       `json:"replacePassword"`
+	Name            string               `json:"name"`
+	Color           string               `json:"color"`
+	Options         db.ConnectionOptions `json:"options"`
+	URL             string               `json:"url"`
+	ReplacePassword bool                 `json:"replacePassword"`
 }
 
 type connectionPayload struct {
-	Mode     string                     `json:"mode"`
-	URL      string                     `json:"url,omitempty"`
-	Options  postgres.ConnectionOptions `json:"options,omitempty"`
-	Password string                     `json:"password,omitempty"`
+	Mode     string               `json:"mode"`
+	URL      string               `json:"url,omitempty"`
+	Options  db.ConnectionOptions `json:"options,omitempty"`
+	Password string               `json:"password,omitempty"`
 }
 
 type connectionKeyProvider func(create bool) ([]byte, error)
 
 type ConnectionsService struct {
 	mu       sync.Mutex
-	database *postgres.Service
+	database *database.Service
 	path     string
 	keys     connectionKeyProvider
 	db       *sql.DB
 	closed   bool
 }
 
-func NewConnectionsService(database *postgres.Service) *ConnectionsService {
+func NewConnectionsService(database *database.Service) *ConnectionsService {
 	return newConnectionsService(database, "", func(create bool) ([]byte, error) {
 		return loadKeychainConnectionKey("io.tusk.app.connections", "encryption-key-v1", create)
 	})
 }
 
-func newConnectionsService(database *postgres.Service, path string, keys connectionKeyProvider) *ConnectionsService {
+func newConnectionsService(database *database.Service, path string, keys connectionKeyProvider) *ConnectionsService {
 	return &ConnectionsService{database: database, path: path, keys: keys}
 }
 
@@ -153,7 +158,7 @@ func (s *ConnectionsService) open() error {
 	if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return errors.New("Could not read saved connection storage")
 	}
-	if version < 0 || version > 2 {
+	if version < 0 || version > 3 {
 		return errors.New("Saved connections use an unsupported database version")
 	}
 	if version == 0 {
@@ -165,13 +170,18 @@ func (s *ConnectionsService) open() error {
 			id TEXT PRIMARY KEY, name TEXT NOT NULL, mode TEXT NOT NULL,
 			host TEXT NOT NULL, port INTEGER NOT NULL, database_name TEXT NOT NULL,
 			user_name TEXT NOT NULL, ssl_mode TEXT NOT NULL, encrypted_payload BLOB NOT NULL,
-			color TEXT NOT NULL DEFAULT ''
-		); PRAGMA user_version=2;`); err != nil {
+			color TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT 'postgres', file_path TEXT NOT NULL DEFAULT ''
+		); PRAGMA user_version=3;`); err != nil {
 			return errors.New("Could not initialize saved connection storage")
 		}
 	}
 	if version == 1 {
 		if _, err := tx.Exec("ALTER TABLE saved_connections ADD COLUMN color TEXT NOT NULL DEFAULT ''; PRAGMA user_version=2;"); err != nil {
+			return errors.New("Could not upgrade saved connection storage")
+		}
+	}
+	if version == 1 || version == 2 {
+		if _, err := tx.Exec("ALTER TABLE saved_connections ADD COLUMN provider TEXT NOT NULL DEFAULT 'postgres'; ALTER TABLE saved_connections ADD COLUMN file_path TEXT NOT NULL DEFAULT ''; PRAGMA user_version=3;"); err != nil {
 			return errors.New("Could not upgrade saved connection storage")
 		}
 	}
@@ -189,7 +199,7 @@ func (s *ConnectionsService) ListConnections() ([]SavedConnection, error) {
 	if err := s.open(); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Query(`SELECT id, name, host, port, database_name, user_name, mode, ssl_mode, color
+	rows, err := s.db.Query(`SELECT id, name, host, port, database_name, user_name, mode, ssl_mode, color, provider, file_path
 		FROM saved_connections ORDER BY name COLLATE NOCASE, id`)
 	if err != nil {
 		return nil, errors.New("Could not list saved connections")
@@ -198,7 +208,7 @@ func (s *ConnectionsService) ListConnections() ([]SavedConnection, error) {
 	connections := make([]SavedConnection, 0)
 	for rows.Next() {
 		var saved SavedConnection
-		if err := rows.Scan(&saved.ID, &saved.Name, &saved.Host, &saved.Port, &saved.Database, &saved.User, &saved.Mode, &saved.SSLMode, &saved.Color); err != nil {
+		if err := rows.Scan(&saved.ID, &saved.Name, &saved.Host, &saved.Port, &saved.Database, &saved.User, &saved.Mode, &saved.SSLMode, &saved.Color, &saved.Provider, &saved.FilePath); err != nil {
 			return nil, errors.New("Could not read a saved connection")
 		}
 		connections = append(connections, saved)
@@ -226,8 +236,8 @@ func (s *ConnectionsService) SaveConnection(input SaveConnectionInput) (SavedCon
 	defer tx.Rollback()
 	var existing SavedConnection
 	var existingPayload []byte
-	err = tx.QueryRow(`SELECT id, name, host, port, database_name, user_name, mode, ssl_mode, color, encrypted_payload
-		FROM saved_connections LIMIT 1`).Scan(&existing.ID, &existing.Name, &existing.Host, &existing.Port, &existing.Database, &existing.User, &existing.Mode, &existing.SSLMode, &existing.Color, &existingPayload)
+	err = tx.QueryRow(`SELECT id, name, host, port, database_name, user_name, mode, ssl_mode, color, provider, file_path, encrypted_payload
+		FROM saved_connections LIMIT 1`).Scan(&existing.ID, &existing.Name, &existing.Host, &existing.Port, &existing.Database, &existing.User, &existing.Mode, &existing.SSLMode, &existing.Color, &existing.Provider, &existing.FilePath, &existingPayload)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return SavedConnection{}, errors.New("Could not read saved connection storage")
 	}
@@ -251,8 +261,8 @@ func (s *ConnectionsService) SaveConnection(input SaveConnectionInput) (SavedCon
 		return SavedConnection{}, err
 	}
 	if _, err := tx.Exec(`INSERT INTO saved_connections
-		(id, name, mode, host, port, database_name, user_name, ssl_mode, color, encrypted_payload)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, saved.ID, saved.Name, saved.Mode, saved.Host, saved.Port, saved.Database, saved.User, saved.SSLMode, saved.Color, encrypted); err != nil {
+		(id, name, mode, host, port, database_name, user_name, ssl_mode, color, provider, file_path, encrypted_payload)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, saved.ID, saved.Name, saved.Mode, saved.Host, saved.Port, saved.Database, saved.User, saved.SSLMode, saved.Color, saved.Provider, saved.FilePath, encrypted); err != nil {
 		return SavedConnection{}, errors.New("Could not save the connection")
 	}
 	if err := tx.Commit(); err != nil {
@@ -269,6 +279,23 @@ func validateSavedConnection(input SaveConnectionInput) (SavedConnection, connec
 		return saved, payload, err
 	}
 	mode := strings.ToLower(strings.TrimSpace(input.Mode))
+	provider := strings.ToLower(strings.TrimSpace(input.Options.Provider))
+	if provider == "sqlite" {
+		if mode != "file" {
+			return saved, payload, errors.New("Choose a SQLite database file")
+		}
+		path, err := sqlite.ValidatePath(input.Options.FilePath)
+		if err != nil {
+			return saved, payload, err
+		}
+		options := db.ConnectionOptions{Provider: "sqlite", FilePath: path}
+		saved = SavedConnection{Name: name, Color: color, Mode: "file", Provider: "sqlite", FilePath: path, Database: filepath.Base(path)}
+		return saved, connectionPayload{Mode: "file", Options: options}, nil
+	}
+	if provider != "" && provider != "postgres" {
+		return saved, payload, errors.New("Choose a supported database provider")
+	}
+	input.Options.Provider, input.Options.FilePath = "postgres", ""
 	var connectionURL string
 	switch mode {
 	case "fields":
@@ -308,7 +335,7 @@ func validateSavedConnection(input SaveConnectionInput) (SavedConnection, connec
 	if sslMode == "" {
 		sslMode = "prefer"
 	}
-	saved = SavedConnection{Name: name, Mode: mode, Host: config.Host, Port: int(config.Port), Database: config.Database, User: config.User, SSLMode: sslMode, Color: color}
+	saved = SavedConnection{Name: name, Provider: "postgres", Mode: mode, Host: config.Host, Port: int(config.Port), Database: config.Database, User: config.User, SSLMode: sslMode, Color: color}
 	return saved, payload, nil
 }
 
@@ -350,8 +377,8 @@ func (s *ConnectionsService) UpdateConnection(id string, input UpdateConnectionI
 	defer tx.Rollback()
 	var saved SavedConnection
 	var encrypted []byte
-	if err := tx.QueryRow(`SELECT id, name, host, port, database_name, user_name, mode, ssl_mode, color, encrypted_payload
-		FROM saved_connections WHERE id = ?`, id).Scan(&saved.ID, &saved.Name, &saved.Host, &saved.Port, &saved.Database, &saved.User, &saved.Mode, &saved.SSLMode, &saved.Color, &encrypted); err != nil {
+	if err := tx.QueryRow(`SELECT id, name, host, port, database_name, user_name, mode, ssl_mode, color, provider, file_path, encrypted_payload
+		FROM saved_connections WHERE id = ?`, id).Scan(&saved.ID, &saved.Name, &saved.Host, &saved.Port, &saved.Database, &saved.User, &saved.Mode, &saved.SSLMode, &saved.Color, &saved.Provider, &saved.FilePath, &encrypted); err != nil {
 		return SavedConnection{}, errors.New("Saved connection was not found or could not be read")
 	}
 	key, err := s.key(false)
@@ -362,8 +389,13 @@ func (s *ConnectionsService) UpdateConnection(id string, input UpdateConnectionI
 	if err != nil {
 		return SavedConnection{}, err
 	}
-	if saved.Mode == "fields" || strings.TrimSpace(input.URL) != "" {
+	provider := strings.ToLower(strings.TrimSpace(input.Options.Provider))
+	if provider != "" && provider != saved.Provider {
+		return SavedConnection{}, errors.New("A saved connection's database provider cannot be changed. Create a new connection instead")
+	}
+	if saved.Mode == "fields" || saved.Mode == "file" || strings.TrimSpace(input.URL) != "" {
 		options := input.Options
+		options.Provider = saved.Provider
 		if saved.Mode == "fields" && !input.ReplacePassword {
 			options.Password = payload.Options.Password
 		}
@@ -379,8 +411,8 @@ func (s *ConnectionsService) UpdateConnection(id string, input UpdateConnectionI
 	if err != nil {
 		return SavedConnection{}, err
 	}
-	if _, err := tx.Exec(`UPDATE saved_connections SET name=?, mode=?, host=?, port=?, database_name=?, user_name=?, ssl_mode=?, color=?, encrypted_payload=? WHERE id=?`,
-		saved.Name, saved.Mode, saved.Host, saved.Port, saved.Database, saved.User, saved.SSLMode, saved.Color, encrypted, id); err != nil {
+	if _, err := tx.Exec(`UPDATE saved_connections SET name=?, mode=?, host=?, port=?, database_name=?, user_name=?, ssl_mode=?, color=?, provider=?, file_path=?, encrypted_payload=? WHERE id=?`,
+		saved.Name, saved.Mode, saved.Host, saved.Port, saved.Database, saved.User, saved.SSLMode, saved.Color, saved.Provider, saved.FilePath, encrypted, id); err != nil {
 		return SavedConnection{}, errors.New("Could not update the saved connection")
 	}
 	if err := tx.Commit(); err != nil {
@@ -457,7 +489,7 @@ func decryptConnection(key []byte, saved SavedConnection, encrypted []byte) (con
 		return payload, errors.New("Saved connection could not be decrypted. Its encryption key is different or the data was changed")
 	}
 	defer clear(plain)
-	if json.Unmarshal(plain, &payload) != nil || (payload.Mode != "fields" && payload.Mode != "url") {
+	if json.Unmarshal(plain, &payload) != nil || (payload.Mode != "fields" && payload.Mode != "url" && payload.Mode != "file") {
 		return connectionPayload{}, errors.New("Saved connection data has an invalid format")
 	}
 	return payload, nil
@@ -471,44 +503,44 @@ func validSavedConnectionID(id string) bool {
 	return err == nil
 }
 
-func (s *ConnectionsService) ConnectSaved(id string) (postgres.ConnectionInfo, error) {
+func (s *ConnectionsService) ConnectSaved(id string) (db.ConnectionInfo, error) {
 	if !validSavedConnectionID(id) {
-		return postgres.ConnectionInfo{}, errors.New("Choose a valid saved connection")
+		return db.ConnectionInfo{}, errors.New("Choose a valid saved connection")
 	}
 	s.mu.Lock()
 	if err := s.open(); err != nil {
 		s.mu.Unlock()
-		return postgres.ConnectionInfo{}, err
+		return db.ConnectionInfo{}, err
 	}
 	var saved SavedConnection
 	var encrypted []byte
-	err := s.db.QueryRow(`SELECT id, name, host, port, database_name, user_name, mode, ssl_mode, color, encrypted_payload
-		FROM saved_connections WHERE id = ?`, id).Scan(&saved.ID, &saved.Name, &saved.Host, &saved.Port, &saved.Database, &saved.User, &saved.Mode, &saved.SSLMode, &saved.Color, &encrypted)
+	err := s.db.QueryRow(`SELECT id, name, host, port, database_name, user_name, mode, ssl_mode, color, provider, file_path, encrypted_payload
+		FROM saved_connections WHERE id = ?`, id).Scan(&saved.ID, &saved.Name, &saved.Host, &saved.Port, &saved.Database, &saved.User, &saved.Mode, &saved.SSLMode, &saved.Color, &saved.Provider, &saved.FilePath, &encrypted)
 	if err != nil {
 		s.mu.Unlock()
-		return postgres.ConnectionInfo{}, errors.New("Saved connection was not found or could not be read")
+		return db.ConnectionInfo{}, errors.New("Saved connection was not found or could not be read")
 	}
 	key, err := s.key(false)
 	if err != nil {
 		s.mu.Unlock()
-		return postgres.ConnectionInfo{}, err
+		return db.ConnectionInfo{}, err
 	}
 	payload, err := decryptConnection(key, saved, encrypted)
 	s.mu.Unlock()
 	if err != nil {
-		return postgres.ConnectionInfo{}, err
+		return db.ConnectionInfo{}, err
 	}
-	if payload.Mode == "fields" {
+	if payload.Mode == "fields" || payload.Mode == "file" {
 		return s.database.ConnectWithOptions(payload.Options)
 	}
 	config, err := pgx.ParseConfig(payload.URL)
 	if err != nil {
-		return postgres.ConnectionInfo{}, errors.New("Saved URL settings could not be resolved. Check its TLS files and connection options")
+		return db.ConnectionInfo{}, errors.New("Saved URL settings could not be resolved. Check its TLS files and connection options")
 	}
 	if config.Host != saved.Host || int(config.Port) != saved.Port || config.Database != saved.Database || config.User != saved.User {
-		return postgres.ConnectionInfo{}, errors.New("Saved URL resolves to different connection settings. Save it again with an explicit host, port, username, and database")
+		return db.ConnectionInfo{}, errors.New("Saved URL resolves to different connection settings. Save it again with an explicit host, port, username, and database")
 	}
-	return postgres.ConnectSavedURL(s.database, payload.URL, payload.Password)
+	return database.ConnectSavedURL(s.database, payload.URL, payload.Password)
 }
 
 func (s *ConnectionsService) DeleteConnection(id string) error {

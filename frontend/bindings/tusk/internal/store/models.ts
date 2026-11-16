@@ -3,14 +3,14 @@
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
-import * as postgres$0 from "../postgres/models.js";
+import * as db$0 from "../db/models.js";
 
 export interface SaveConnectionInput {
     "color": string;
     "name": string;
     "mode": string;
     "url": string;
-    "options": postgres$0.ConnectionOptions;
+    "options": db$0.ConnectionOptions;
 }
 
 export interface SavedConnection {
@@ -27,12 +27,14 @@ export interface SavedConnection {
      * Empty colors preserve the authenticated metadata of version 1 records.
      */
     "color"?: string;
+    "provider": string;
+    "filePath"?: string;
 }
 
 export interface UpdateConnectionInput {
     "name": string;
     "color": string;
-    "options": postgres$0.ConnectionOptions;
+    "options": db$0.ConnectionOptions;
     "url": string;
     "replacePassword": boolean;
 }

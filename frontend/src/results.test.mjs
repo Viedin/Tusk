@@ -20,6 +20,13 @@ test('text and null sorting is stable, nulls stay last and source rows are not m
   assert.deepEqual(rows, [['b'], [null], [''], ['a'], ['a'], [null]]);
 });
 
+test('SQLite declared numeric types sort numerically and REPLACE shows its affected count', () => {
+  for (const type of ['INT', 'REAL', 'NUMERIC(10, 2)', 'DOUBLE', 'INTEGER']) {
+    assert.deepEqual(sortedRowIndices([['10'], ['2'], [null]], 0, type, false), [1, 0, 2]);
+  }
+  assert.equal(resultStatus({ columns: [], rowCount: 0, rowsAffected: '1', commandTag: 'REPLACE' }), '1 rows affected');
+});
+
 test('affected counts are shown only for modifying commands, including zero-row writes', () => {
   for (const tag of ['SELECT 10', 'CREATE TABLE', 'EXPLAIN', 'FETCH 3', 'COPY 4', '']) assert.equal(hasAffectedRows(tag), false);
   for (const tag of ['INSERT 0 1', 'UPDATE 0', 'DELETE 2', 'MERGE 3']) assert.equal(hasAffectedRows(tag), true);

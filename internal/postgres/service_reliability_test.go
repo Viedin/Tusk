@@ -65,7 +65,7 @@ func TestPostgreSQLReliability(t *testing.T) {
 
 	t.Run("cancel reaches server during result drain", func(t *testing.T) {
 		s := connect(t)
-		pid := s.conn.PgConn().PID()
+		pid := backendPID(t, s)
 		done := make(chan error, 1)
 		go func() {
 			_, err := s.RunQuery("SELECT repeat('x', 1048576), pg_sleep(0.01) FROM generate_series(1, 100000)")
@@ -101,7 +101,7 @@ func TestPostgreSQLReliability(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			s := connect(t)
-			pid := s.conn.PgConn().PID()
+			pid := backendPID(t, s)
 			done := make(chan error, 1)
 			go func() { _, err := s.RunQuery("SELECT pg_sleep(30)"); done <- err }()
 			waitActive(t, pid)

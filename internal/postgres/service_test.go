@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5"
+	"tusk/internal/db"
 )
 
 func TestResultValuesPreserveNullEmptyAndPrecision(t *testing.T) {
@@ -35,33 +35,6 @@ func TestResultByteLimitIncludesJSONEscaping(t *testing.T) {
 	}
 	if bytes != 0 || len(result.Rows) != 0 {
 		t.Fatal("rejected row changed result")
-	}
-}
-
-func TestOperationGateAndCancellation(t *testing.T) {
-	s := NewService()
-	ctx, _, finish, err := s.begin(false, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, _, err := s.begin(false, time.Minute); err == nil {
-		t.Fatal("allowed a second active operation")
-	}
-	if err := s.CancelQuery(); err != nil {
-		t.Fatal(err)
-	}
-	if ctx.Err() != context.Canceled {
-		t.Fatalf("operation not canceled: %v", ctx.Err())
-	}
-	finish()
-	_, _, finish, err = s.begin(false, time.Minute)
-	if err != nil {
-		t.Fatalf("gate not released: %v", err)
-	}
-	finish()
-	s.Shutdown()
-	if _, _, _, err := s.begin(false, time.Minute); err == nil {
-		t.Fatal("allowed an operation after shutdown")
 	}
 }
 
@@ -164,15 +137,15 @@ func TestStructuredConnectionValidation(t *testing.T) {
 }
 
 func TestJDBCPostgreSQLURLNormalization(t *testing.T) {
-	s := NewService()
-	s.Shutdown()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	for _, connectionURL := range []string{"jdbc:postgresql://user:secret@localhost/db?sslmode=disable", "jdbc:postgres://user:secret@localhost/db?sslmode=disable"} {
-		_, err := s.Connect(connectionURL)
-		if err == nil || !strings.Contains(err.Error(), "shutting down") {
+		_, _, err := NewProvider().Open(ctx, db.ConnectionConfig{URL: connectionURL})
+		if err == nil || !strings.Contains(err.Error(), "canceled") {
 			t.Fatalf("JDBC PostgreSQL URL failed validation: %v", err)
 		}
 	}
-	if _, err := s.Connect("jdbc:mysql://user:secret@localhost/db"); err == nil || strings.Contains(err.Error(), "shutting down") {
+	if _, _, err := NewProvider().Open(ctx, db.ConnectionConfig{URL: "jdbc:mysql://user:secret@localhost/db"}); err == nil || strings.Contains(err.Error(), "canceled") {
 		t.Fatal("accepted a JDBC URL for another database engine")
 	}
 }

@@ -12,8 +12,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"tusk/internal/postgres"
 )
 
 var storageSecurityKey = bytes.Repeat([]byte{0x41}, 32)
@@ -27,7 +25,7 @@ func securityConnectionInput() SaveConnectionInput {
 
 func securityConnectionStore(t *testing.T, path string, keys connectionKeyProvider) *ConnectionsService {
 	t.Helper()
-	database := postgres.NewService()
+	database := connectionTestDatabase()
 	database.Shutdown() // Successful decryption can be checked without network access.
 	store := newConnectionsService(database, path, keys)
 	t.Cleanup(store.Shutdown)
@@ -131,7 +129,7 @@ func TestSavedConnectionCiphertextOnlyOnDisk(t *testing.T) {
 }
 
 func TestSavedConnectionRejectsChangedDataAndKeys(t *testing.T) {
-	for _, change := range []string{"ciphertext", "record-id", "empty-record-id", "metadata", "wrong-key", "missing-key", "invalid-key"} {
+	for _, change := range []string{"ciphertext", "record-id", "empty-record-id", "metadata", "provider", "wrong-key", "missing-key", "invalid-key"} {
 		t.Run(change, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "connections.sqlite3")
 			store := securityConnectionStore(t, path, func(bool) ([]byte, error) { return storageSecurityKey, nil })
@@ -157,6 +155,8 @@ func TestSavedConnectionRejectsChangedDataAndKeys(t *testing.T) {
 				_, err = db.Exec("UPDATE saved_connections SET id='' WHERE id=?", saved.ID)
 			case "metadata":
 				_, err = db.Exec("UPDATE saved_connections SET host=? WHERE id=?", "changed.invalid", id)
+			case "provider":
+				_, err = db.Exec("UPDATE saved_connections SET provider='sqlite' WHERE id=?", id)
 			case "wrong-key":
 				keys = func(create bool) ([]byte, error) {
 					if create {

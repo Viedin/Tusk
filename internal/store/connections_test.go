@@ -12,8 +12,15 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"tusk/internal/database"
+	"tusk/internal/db"
 	"tusk/internal/postgres"
+	"tusk/internal/sqlite"
 )
+
+func connectionTestDatabase() *database.Service {
+	return database.NewService(map[string]db.Provider{"postgres": postgres.NewProvider(), "sqlite": sqlite.NewProvider()})
+}
 
 func connectionTestKey(t *testing.T) []byte {
 	t.Helper()
@@ -27,7 +34,7 @@ func connectionTestKey(t *testing.T) []byte {
 func connectionTestInput() SaveConnectionInput {
 	return SaveConnectionInput{
 		Name: " Local database ", Mode: "fields",
-		Options: postgres.ConnectionOptions{Host: "localhost", Port: 5432, Database: "test", User: "user", Password: " keep @:/? this exact \t", SSLMode: "disable"},
+		Options: db.ConnectionOptions{Host: "localhost", Port: 5432, Database: "test", User: "user", Password: " keep @:/? this exact \t", SSLMode: "disable"},
 	}
 }
 
@@ -42,7 +49,7 @@ func TestConnectionStorePersistenceAndCRUD(t *testing.T) {
 		}
 		return key, nil
 	}
-	store := newConnectionsService(postgres.NewService(), path, provider)
+	store := newConnectionsService(connectionTestDatabase(), path, provider)
 	defer store.Shutdown()
 	if connections, err := store.ListConnections(); err != nil || len(connections) != 0 || calls != 0 {
 		t.Fatalf("empty listing attempted key access: %v", err)
@@ -52,7 +59,7 @@ func TestConnectionStorePersistenceAndCRUD(t *testing.T) {
 		t.Fatalf("save metadata incorrect: %+v %v", saved, err)
 	}
 	store.Shutdown()
-	reopened := newConnectionsService(postgres.NewService(), path, provider)
+	reopened := newConnectionsService(connectionTestDatabase(), path, provider)
 	defer reopened.Shutdown()
 	connections, err := reopened.ListConnections()
 	if err != nil || len(connections) != 1 || connections[0] != saved || calls != 1 {
@@ -70,9 +77,85 @@ func TestConnectionStorePersistenceAndCRUD(t *testing.T) {
 	}
 }
 
+func TestSavedPostgreSQLProviderIsExplicit(t *testing.T) {
+	for _, mode := range []string{"fields", "url"} {
+		t.Run(mode, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "connections.sqlite3")
+			keys := func(bool) ([]byte, error) { return storageSecurityKey, nil }
+			store := securityConnectionStore(t, path, keys)
+			input := connectionTestInput()
+			if mode == "url" {
+				input = securityConnectionInput()
+			}
+			saved, err := store.SaveConnection(input)
+			if err != nil || saved.Provider != "postgres" {
+				t.Fatalf("PostgreSQL provider missing from saved metadata: %+v %v", saved, err)
+			}
+			storage := securitySQLite(t, path)
+			var provider string
+			if err := storage.QueryRow("SELECT provider FROM saved_connections WHERE id=?", saved.ID).Scan(&provider); err != nil || provider != "postgres" {
+				t.Fatalf("PostgreSQL provider missing from stored row: provider=%q error=%v", provider, err)
+			}
+			if mode == "fields" {
+				payload, err := decryptConnection(storageSecurityKey, saved, securityPayload(t, storage, saved.ID))
+				if err != nil || payload.Options.Provider != "postgres" {
+					t.Fatalf("PostgreSQL provider missing from saved options: %v", err)
+				}
+			}
+			store.Shutdown()
+			reopened := securityConnectionStore(t, path, keys)
+			listed, err := reopened.ListConnections()
+			if err != nil || len(listed) != 1 || listed[0] != saved {
+				t.Fatalf("saved provider did not survive restart: %v", err)
+			}
+			if _, err := reopened.ConnectSaved(saved.ID); err == nil || !strings.Contains(err.Error(), "shutting down") {
+				t.Fatalf("explicit provider record failed authentication: %v", err)
+			}
+		})
+	}
+}
+
+func TestConnectionStoreUpgradesEmptySchemas(t *testing.T) {
+	for _, version := range []string{"1", "2"} {
+		t.Run(version, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "connections.sqlite3")
+			location := url.URL{Scheme: "file", Path: path}
+			storage, err := sql.Open("sqlite3", location.String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer storage.Close()
+			colorColumn := ""
+			if version == "2" {
+				colorColumn = ", color TEXT NOT NULL DEFAULT ''"
+			}
+			if _, err := storage.Exec(`CREATE TABLE saved_connections (
+				id TEXT PRIMARY KEY, name TEXT NOT NULL, mode TEXT NOT NULL,
+				host TEXT NOT NULL, port INTEGER NOT NULL, database_name TEXT NOT NULL,
+				user_name TEXT NOT NULL, ssl_mode TEXT NOT NULL, encrypted_payload BLOB NOT NULL
+			` + colorColumn + "); PRAGMA user_version=" + version); err != nil {
+				t.Fatal(err)
+			}
+			store := securityConnectionStore(t, path, func(bool) ([]byte, error) { return storageSecurityKey, nil })
+			listed, err := store.ListConnections()
+			if err != nil || len(listed) != 0 {
+				t.Fatalf("empty schema upgrade failed: %v", err)
+			}
+			var upgraded int
+			if err := storage.QueryRow("PRAGMA user_version").Scan(&upgraded); err != nil || upgraded != 3 {
+				t.Fatal("schema version was not upgraded")
+			}
+			saved, err := store.SaveConnection(connectionTestInput())
+			if err != nil || saved.Provider != "postgres" {
+				t.Fatalf("upgraded schema could not save an explicit PostgreSQL provider: %v", err)
+			}
+		})
+	}
+}
+
 func TestConnectionStoreParallelCRUD(t *testing.T) {
 	key := connectionTestKey(t)
-	store := newConnectionsService(postgres.NewService(), filepath.Join(t.TempDir(), "connections.sqlite3"), func(bool) ([]byte, error) { return key, nil })
+	store := newConnectionsService(connectionTestDatabase(), filepath.Join(t.TempDir(), "connections.sqlite3"), func(bool) ([]byte, error) { return key, nil })
 	defer store.Shutdown()
 	var work sync.WaitGroup
 	for range 12 {
@@ -111,7 +194,7 @@ func TestConnectionStoreRejectsInvalidSettingsBeforeOpening(t *testing.T) {
 		input := connectionTestInput()
 		change(&input)
 		path := filepath.Join(t.TempDir(), "not-created", "connections.sqlite3")
-		store := newConnectionsService(postgres.NewService(), path, func(bool) ([]byte, error) { t.Fatal("invalid settings touched Keychain"); return nil, nil })
+		store := newConnectionsService(connectionTestDatabase(), path, func(bool) ([]byte, error) { t.Fatal("invalid settings touched Keychain"); return nil, nil })
 		if _, err := store.SaveConnection(input); err == nil || strings.Contains(err.Error(), "DO-NOT-ECHO") {
 			t.Fatal("invalid settings accepted or exposed credentials")
 		}
@@ -123,7 +206,7 @@ func TestConnectionStoreRejectsInvalidSettingsBeforeOpening(t *testing.T) {
 }
 
 func TestConnectionStoreRejectsUnknownDatabaseFormats(t *testing.T) {
-	for _, setup := range []string{"PRAGMA user_version=3", "CREATE TABLE unrelated (value TEXT)"} {
+	for _, setup := range []string{"PRAGMA user_version=4", "CREATE TABLE unrelated (value TEXT)"} {
 		path := filepath.Join(t.TempDir(), "connections.sqlite3")
 		location := url.URL{Scheme: "file", Path: path}
 		db, err := sql.Open("sqlite3", location.String())
@@ -134,7 +217,7 @@ func TestConnectionStoreRejectsUnknownDatabaseFormats(t *testing.T) {
 			t.Fatal(err)
 		}
 		db.Close()
-		store := newConnectionsService(postgres.NewService(), path, func(bool) ([]byte, error) { t.Fatal("unknown database touched Keychain"); return nil, nil })
+		store := newConnectionsService(connectionTestDatabase(), path, func(bool) ([]byte, error) { t.Fatal("unknown database touched Keychain"); return nil, nil })
 		if _, err := store.ListConnections(); err == nil {
 			t.Fatal("unknown database format was overwritten")
 		}
@@ -156,7 +239,7 @@ func TestSavedURLExplicitTLSIgnoresEnvironment(t *testing.T) {
 	for _, suffix := range []string{"sslmode=require", "ssl=true"} {
 		t.Setenv("PGSSLMODE", "require")
 		key := connectionTestKey(t)
-		database := postgres.NewService()
+		database := connectionTestDatabase()
 		database.Shutdown()
 		store := newConnectionsService(database, filepath.Join(t.TempDir(), "connections.sqlite3"), func(bool) ([]byte, error) { return key, nil })
 		saved, err := store.SaveConnection(SaveConnectionInput{Name: "Explicit TLS fixture", Mode: "url", URL: "postgresql://user:PRIVATE-PASSWORD@localhost/database?" + suffix})
@@ -196,11 +279,11 @@ func TestPostgreSQLSavedConnections(t *testing.T) {
 	}
 	key := connectionTestKey(t)
 	path := filepath.Join(t.TempDir(), "connections.sqlite3")
-	database := postgres.NewService()
+	database := connectionTestDatabase()
 	defer database.Shutdown()
 	provider := func(bool) ([]byte, error) { return key, nil }
 	store := newConnectionsService(database, path, provider)
-	input := SaveConnectionInput{Name: "Fields fixture", Mode: "fields", Options: postgres.ConnectionOptions{Host: config.Host, Port: int(config.Port), Database: config.Database, User: config.User, Password: config.Password, SSLMode: "disable"}}
+	input := SaveConnectionInput{Name: "Fields fixture", Mode: "fields", Options: db.ConnectionOptions{Host: config.Host, Port: int(config.Port), Database: config.Database, User: config.User, Password: config.Password, SSLMode: "disable"}}
 	saved, err := store.SaveConnection(input)
 	if err != nil {
 		t.Fatal(err)

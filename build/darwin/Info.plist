@@ -5,7 +5,7 @@
 	<key>CFBundleExecutable</key>
 	<string>tusk</string>
 	<key>CFBundleGetInfoString</key>
-	<string>A lightweight PostgreSQL desktop client</string>
+	<string>A lightweight PostgreSQL and SQLite desktop client</string>
 	<key>CFBundleIconFile</key>
 	<string>icons</string>
 	<key>CFBundleIdentifier</key>

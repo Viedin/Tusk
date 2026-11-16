@@ -123,37 +123,3 @@ func TestSavedConnectionColorIsAuthenticatedAndInvalidEditsAreAtomic(t *testing.
 		t.Fatal("tampered color reached the connector")
 	}
 }
-
-func TestVersionOneConnectionsMigrateWithoutCredentialChanges(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "connections.sqlite3")
-	store := securityConnectionStore(t, path, func(bool) ([]byte, error) { return storageSecurityKey, nil })
-	saved, err := store.SaveConnection(connectionTestInput())
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded, _ := json.Marshal(saved)
-	if bytes.Contains(encoded, []byte("color")) {
-		t.Fatal("empty color changed legacy authenticated metadata")
-	}
-	store.Shutdown()
-	db := securitySQLite(t, path)
-	original := securityPayload(t, db, saved.ID)
-	if _, err := db.Exec("ALTER TABLE saved_connections DROP COLUMN color; PRAGMA user_version=1;"); err != nil {
-		t.Fatal(err)
-	}
-	reopened := securityConnectionStore(t, path, func(bool) ([]byte, error) { return storageSecurityKey, nil })
-	listed, err := reopened.ListConnections()
-	if err != nil || len(listed) != 1 || listed[0] != saved {
-		t.Fatalf("legacy metadata changed: %v", err)
-	}
-	if !bytes.Equal(original, securityPayload(t, db, saved.ID)) {
-		t.Fatal("migration rewrote encrypted credentials")
-	}
-	var version int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
-		t.Fatal("migration version incorrect")
-	}
-	if _, err := reopened.ConnectSaved(saved.ID); err == nil || !strings.Contains(err.Error(), "shutting down") {
-		t.Fatalf("legacy credentials failed to decrypt after migration: %v", err)
-	}
-}

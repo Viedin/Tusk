@@ -3,15 +3,16 @@
   import { basicSetup, EditorView } from 'codemirror';
   import { Compartment } from '@codemirror/state';
   import { keymap, placeholder } from '@codemirror/view';
-  import { PostgreSQL, sql } from '@codemirror/lang-sql';
+  import { sql } from '@codemirror/lang-sql';
   import { startCompletion } from '@codemirror/autocomplete';
   import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
   import { tags } from '@lezer/highlight';
-  import { queryCompletionSource } from './sqlCompletion';
+  import { queryCompletionSource, sqlDialect } from './sqlCompletion';
 
-  let { value = $bindable(''), disabled = false, tables = [], columns = [], onrun }: {
+  let { value = $bindable(''), disabled = false, provider = 'postgres', tables = [], columns = [], onrun }: {
     value?: string;
     disabled?: boolean;
+    provider?: string;
     tables?: { schema: string; name: string; type: string }[];
     columns?: { schema: string; table: string; name: string; dataType?: string }[];
     onrun: (statement: string) => void;
@@ -30,9 +31,10 @@
   export function focus(): void { view?.focus(); }
 
   function sqlSupport() {
+    const dialect = sqlDialect(provider);
     return [
-      sql({ dialect: PostgreSQL, upperCaseKeywords: true }),
-      PostgreSQL.language.data.of({ autocomplete: queryCompletionSource(tables, columns) }),
+      sql({ dialect, upperCaseKeywords: true }),
+      dialect.language.data.of({ autocomplete: queryCompletionSource(tables, columns, provider) }),
     ];
   }
 
@@ -61,41 +63,47 @@
         placeholder('Write a SQL statement…'),
         language.of(sqlSupport()),
         syntaxHighlighting(HighlightStyle.define([
-          { tag: tags.keyword, color: '#262626', fontWeight: '600' },
-          { tag: [tags.string, tags.special(tags.string)], color: '#444444' },
-          { tag: [tags.number, tags.bool, tags.null], color: '#4a4a4a' },
-          { tag: [tags.typeName, tags.standard(tags.name)], color: '#3e3e3e' },
-          { tag: tags.comment, color: '#555555', fontStyle: 'italic' },
-          { tag: tags.operator, color: '#555555' },
+          { tag: tags.keyword, color: 'var(--sql-keyword)', fontWeight: '600' },
+          { tag: [tags.string, tags.special(tags.string)], color: 'var(--sql-string)' },
+          { tag: [tags.number, tags.bool, tags.null], color: 'var(--sql-literal)' },
+          { tag: [tags.typeName, tags.standard(tags.name)], color: 'var(--sql-type)' },
+          { tag: tags.comment, color: 'var(--sql-comment)', fontStyle: 'italic' },
+          { tag: tags.operator, color: 'var(--sql-comment)' },
         ])),
         EditorView.contentAttributes.of({ 'aria-label': 'SQL statement', spellcheck: 'false' }),
         EditorView.updateListener.of(update => {
           if (update.docChanged) value = update.state.doc.toString();
         }),
         EditorView.theme({
-          '&': { height: '100%', fontSize: '14px', color: '#1f1f1f', backgroundColor: '#ffffff' },
+          '&': { height: '100%', fontSize: '14px', color: 'var(--ink)', backgroundColor: 'var(--background)' },
           '.cm-scroller': { overflow: 'auto', fontFamily: 'var(--mono)', lineHeight: '1.75' },
-          '.cm-content': { padding: '14px 0' },
+          '.cm-content': { padding: '14px 0', caretColor: 'var(--ink)' },
           '.cm-line': { padding: '0 16px' },
-          '.cm-gutters': { backgroundColor: '#fafafa', color: '#666666', borderRight: '1px solid #e9e9e9' },
-          '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: '#00000005' },
-          '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#202020' },
+          '.cm-gutters': { backgroundColor: 'var(--surface)', color: 'var(--muted)', borderRight: '1px solid var(--border)' },
+          '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: 'var(--sql-active-line)' },
+          '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--ink)' },
           '&.cm-focused': { outline: 'none' },
-          '& .cm-selectionLayer .cm-selectionBackground': { backgroundColor: '#e7e7e7' },
-          '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': { backgroundColor: '#cfcfcf' },
-          '.cm-content ::selection': { backgroundColor: '#cfcfcf' },
-          '.cm-selectionMatch': { backgroundColor: '#e5e5e5' },
-          '.cm-tooltip': { border: '1px solid #cccccc', borderRadius: '5px', backgroundColor: '#ffffff', boxShadow: '0 4px 12px #00000012', color: '#1f1f1f' },
+          '& .cm-selectionLayer .cm-selectionBackground': { backgroundColor: 'var(--selection)' },
+          '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': { backgroundColor: 'var(--selection-focused)' },
+          '.cm-content ::selection': { backgroundColor: 'var(--selection-focused)' },
+          '.cm-selectionMatch': { backgroundColor: 'var(--accent-soft)' },
+          '.cm-tooltip': { border: '1px solid var(--control-border)', borderRadius: '5px', backgroundColor: 'var(--background)', boxShadow: '0 4px 12px var(--shadow)', color: 'var(--ink)' },
           '.cm-tooltip-autocomplete > ul': { fontFamily: 'var(--mono)', fontSize: '13px', maxHeight: '240px', maxWidth: 'min(650px, 85vw)' },
           '.cm-tooltip-autocomplete > ul > li': { padding: '6px 10px' },
-          '.cm-tooltip-autocomplete > ul > li[aria-selected]': { backgroundColor: '#e8e8e8', color: '#1f1f1f' },
-          '.cm-completionDetail': { marginLeft: '16px', color: '#666666', fontFamily: 'var(--ui)', fontSize: '12px' },
-          '.cm-completionMatchedText': { color: '#111111', textDecoration: 'none', fontWeight: '600' },
-          '.cm-searchMatch': { backgroundColor: '#e7e7e7' },
-          '.cm-searchMatch-selected': { backgroundColor: '#cccccc' },
-          '.cm-panels': { color: '#1f1f1f', backgroundColor: '#f3f3f3' },
-          '.cm-textfield': { color: '#1f1f1f', backgroundColor: '#ffffff', border: '1px solid #d5d5d5' },
-        }, { dark: false }),
+          '.cm-tooltip-autocomplete > ul > li[aria-selected]': { backgroundColor: 'var(--selection)', color: 'var(--ink)' },
+          '.cm-completionDetail': { marginLeft: '16px', color: 'var(--muted)', fontFamily: 'var(--ui)', fontSize: '12px' },
+          '.cm-completionMatchedText': { color: 'var(--ink)', textDecoration: 'none', fontWeight: '600' },
+          '.cm-searchMatch': { backgroundColor: 'var(--selection)' },
+          '.cm-searchMatch-selected': { backgroundColor: 'var(--selection-focused)' },
+          '.cm-placeholder': { color: 'var(--subtle)' },
+          '.cm-foldPlaceholder': { color: 'var(--muted)', backgroundColor: 'var(--hover)', borderColor: 'var(--border)' },
+          '.cm-panels-top, .cm-panels-bottom': { borderColor: 'var(--border)' },
+          '.cm-button': { color: 'var(--ink)', background: 'var(--background)', borderColor: 'var(--control-border)' },
+          '.cm-button:hover': { background: 'var(--hover)' },
+          '.cm-button:active': { background: 'var(--selection)' },
+          '.cm-panels': { color: 'var(--ink)', backgroundColor: 'var(--hover)' },
+          '.cm-textfield': { color: 'var(--ink)', backgroundColor: 'var(--background)', border: '1px solid var(--control-border)' },
+        }),
       ],
     });
     return () => view?.destroy();
@@ -105,5 +113,23 @@
 <div class="editor-host" bind:this={host}></div>
 
 <style>
-  .editor-host { height: 100%; min-height: 150px; overflow: hidden; }
+  .editor-host {
+    --sql-keyword: #262626;
+    --sql-string: #444444;
+    --sql-literal: #4a4a4a;
+    --sql-type: #3e3e3e;
+    --sql-comment: #555555;
+    --sql-active-line: #00000005;
+    height: 100%; min-height: 150px; overflow: hidden;
+  }
+  @media (prefers-color-scheme: dark) {
+    .editor-host {
+      --sql-keyword: #e5e5e5;
+      --sql-string: #c8c8c8;
+      --sql-literal: #bfbfbf;
+      --sql-type: #cecece;
+      --sql-comment: #a8a8a8;
+      --sql-active-line: #ffffff06;
+    }
+  }
 </style>

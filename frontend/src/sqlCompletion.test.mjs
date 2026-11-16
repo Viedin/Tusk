@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { Compartment, EditorState } from '@codemirror/state';
 import { CompletionContext } from '@codemirror/autocomplete';
-import { PostgreSQL, schemaCompletionSource, sql } from '@codemirror/lang-sql';
-import { queryCompletionSource, quoteIdentifier, sqlCompletionConfig } from './sqlCompletion.ts';
+import { PostgreSQL, SQLite, schemaCompletionSource, sql } from '@codemirror/lang-sql';
+import { queryCompletionSource, quoteIdentifier, sqlCompletionConfig, sqlDialect } from './sqlCompletion.ts';
 
 const config = sqlCompletionConfig([
   { schema: 'public', name: 'events', type: 'table' },
@@ -40,6 +40,19 @@ const insideQuote = await completions('SELECT "Odd.schema"."Order Lines"."A');
 assert(insideQuote.some(option => option.label === '"A ""column"'));
 assert.deepEqual(await schemaCompletionSource(sqlCompletionConfig([], []))(new CompletionContext(EditorState.create({ extensions: [sql()] }), 0, true)), { from: 0, options: [], validFor: /^\w*$/ });
 console.log('SQL completion checks passed');
+
+{
+  const tables = [{ schema: 'main', name: 'Assets', type: 'table' }];
+  const columns = [{ schema: 'main', table: 'Assets', name: 'AssetId', dataType: 'INTEGER' }];
+  const config = sqlCompletionConfig(tables, columns, 'sqlite');
+  assert.equal(config.dialect, SQLite);
+  assert.equal(config.defaultSchema, 'main');
+  assert.equal(sqlDialect('sqlite'), SQLite);
+  const doc = 'SELECT  FROM assets';
+  const state = EditorState.create({ doc, extensions: [sql(config)] });
+  const result = await queryCompletionSource(tables, columns, 'sqlite')(new CompletionContext(state, 7, true));
+  assert(result?.options.some(option => option.displayLabel === 'AssetId' && option.apply === '"AssetId"'));
+}
 
 // Exercise the actual language-data source for automatic and explicit completion.
 const queryTables = [

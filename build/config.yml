@@ -3,7 +3,7 @@ info:
   companyName: Tusk contributors
   productName: Tusk
   productIdentifier: io.tusk.app
-  description: A lightweight PostgreSQL desktop client
+  description: A lightweight PostgreSQL and SQLite desktop client
   copyright: Copyright © 2026 Tusk contributors
   version: 0.1.0
 

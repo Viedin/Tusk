@@ -7,13 +7,13 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
-import * as postgres$0 from "../postgres/models.js";
+import * as db$0 from "../db/models.js";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
 import * as $models from "./models.js";
 
-export function ConnectSaved(id: string): $CancellablePromise<postgres$0.ConnectionInfo> {
+export function ConnectSaved(id: string): $CancellablePromise<db$0.ConnectionInfo> {
     return $Call.ByID(733639227, id);
 }
 
